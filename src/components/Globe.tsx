@@ -297,6 +297,84 @@ function AircraftLayer({
   );
 }
 
+// Trails behind each aircraft - computed from heading, drawn as line segments
+function AircraftTrails({
+  aircraft,
+  filters,
+}: {
+  aircraft: Aircraft[];
+  filters: Set<Aircraft['category']>;
+}) {
+  const lineRef = useRef<THREE.LineSegments>(null);
+  
+  const filtered = useMemo(
+    () => aircraft.filter(a => filters.has(a.category)),
+    [aircraft, filters]
+  );
+
+  useEffect(() => {
+    if (!lineRef.current || filtered.length === 0) return;
+    
+    const geo = lineRef.current.geometry;
+    // 2 vertices per trail (start = behind plane, end = plane position)
+    const posArray = new Float32Array(filtered.length * 6);
+    const colorArray = new Float32Array(filtered.length * 6);
+    
+    filtered.forEach((a, i) => {
+      const [px, py, pz] = latLngAltToVector3(a.lat, a.lng, a.altitude / 1000, GLOBE_RADIUS);
+      
+      // Compute trail origin: go backwards along heading
+      // Trail length proportional to speed (faster = longer trail)
+      const speedFactor = Math.min(a.velocity / 250, 1.0); // normalise to 0-1
+      const trailLength = 0.8 + speedFactor * 1.5; // degrees of arc
+      
+      const headingRad = ((a.heading + 180) % 360) * (Math.PI / 180); // reverse heading
+      const trailLat = a.lat + Math.cos(headingRad) * trailLength;
+      const trailLng = a.lng + Math.sin(headingRad) * trailLength;
+      
+      const [tx, ty, tz] = latLngAltToVector3(trailLat, trailLng, a.altitude / 1000, GLOBE_RADIUS);
+      
+      // Trail start (behind) 
+      posArray[i * 6] = tx;
+      posArray[i * 6 + 1] = ty;
+      posArray[i * 6 + 2] = tz;
+      // Trail end (at plane)
+      posArray[i * 6 + 3] = px;
+      posArray[i * 6 + 4] = py;
+      posArray[i * 6 + 5] = pz;
+      
+      const col = new THREE.Color(CATEGORY_COLORS[a.category]);
+      // Tail end: faded
+      colorArray[i * 6] = col.r * 0.2;
+      colorArray[i * 6 + 1] = col.g * 0.2;
+      colorArray[i * 6 + 2] = col.b * 0.2;
+      // Head end: bright
+      colorArray[i * 6 + 3] = col.r;
+      colorArray[i * 6 + 4] = col.g;
+      colorArray[i * 6 + 5] = col.b;
+    });
+    
+    geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(colorArray, 3));
+    geo.computeBoundingSphere();
+  }, [filtered]);
+
+  if (filtered.length === 0) return null;
+
+  return (
+    <lineSegments ref={lineRef} frustumCulled={false}>
+      <bufferGeometry />
+      <lineBasicMaterial
+        vertexColors
+        transparent
+        opacity={0.5}
+        blending={THREE.AdditiveBlending}
+        depthWrite={false}
+      />
+    </lineSegments>
+  );
+}
+
 // Selected aircraft glow ring
 function SelectedGlow({
   aircraft,
@@ -394,6 +472,11 @@ function Scene({
       <Earth />
       <Atmosphere />
       <Stars radius={100} depth={50} count={5000} factor={4} />
+      
+      <AircraftTrails
+        aircraft={aircraft}
+        filters={filters}
+      />
       
       <AircraftLayer
         aircraft={aircraft}
