@@ -85,10 +85,10 @@ const pointVertexShader = `
     
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
     
-    // Scale point size based on distance (closer = bigger)
-    float size = selected > 0.5 ? 12.0 : 6.0;
-    gl_PointSize = size * (300.0 / -mvPosition.z);
-    gl_PointSize = clamp(gl_PointSize, 2.0, 24.0);
+    // Scale point size based on distance (closer = bigger, further = smaller)
+    float baseSize = selected > 0.5 ? 10.0 : 5.0;
+    gl_PointSize = baseSize * (5.0 / -mvPosition.z);
+    gl_PointSize = clamp(gl_PointSize, 1.5, 16.0);
     
     gl_Position = projectionMatrix * mvPosition;
   }
