@@ -33,6 +33,10 @@ export async function fetchAircraftClient(): Promise<{ aircraft: Aircraft[]; tim
     cache: 'no-store',
   });
   
+  if (res.status === 429) {
+    throw new Error('RATE_LIMITED');
+  }
+  
   if (!res.ok) throw new Error(`OpenSky API: ${res.status}`);
   
   const data = await res.json();

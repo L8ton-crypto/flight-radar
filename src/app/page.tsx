@@ -56,7 +56,18 @@ export default function Home() {
       }
     } catch (err) {
       console.error('Fetch error:', err);
-      setError('Failed to fetch aircraft data. Retrying...');
+      const msg = err instanceof Error ? err.message : '';
+      if (msg === 'RATE_LIMITED') {
+        setError('Rate limited by OpenSky. Backing off for 30s...');
+        // Back off - clear interval, wait 30s, restart
+        if (intervalRef.current) clearInterval(intervalRef.current);
+        setTimeout(() => {
+          fetchData();
+          intervalRef.current = setInterval(fetchData, REFRESH_INTERVAL);
+        }, 30000);
+      } else {
+        setError('Failed to fetch aircraft data. Retrying...');
+      }
     } finally {
       setIsLoading(false);
     }
