@@ -41,9 +41,27 @@ export default function Home() {
     setIsLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/aircraft');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      // Try our API proxy first, fall back to direct OpenSky
+      let data;
+      try {
+        const res = await fetch('/api/aircraft');
+        if (!res.ok) throw new Error(`Proxy: ${res.status}`);
+        data = await res.json();
+        if (data.error) throw new Error(data.error);
+      } catch {
+        // Direct fallback - OpenSky allows CORS
+        const res = await fetch('https://opensky-network.org/api/states/all');
+        if (!res.ok) throw new Error(`OpenSky: ${res.status}`);
+        const raw = await res.json();
+        const { classifyAndParse } = await import('@/lib/opensky');
+        data = {
+          time: Date.now(),
+          aircraft: classifyAndParse(raw),
+          count: 0,
+        };
+        data.count = data.aircraft.length;
+      }
+      
       setAircraft(data.aircraft || []);
       setLastUpdate(data.time);
       

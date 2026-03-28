@@ -65,10 +65,19 @@ export async function fetchAircraft(bounds?: {
     url += `?lamin=${bounds.lamin}&lamax=${bounds.lamax}&lomin=${bounds.lomin}&lomax=${bounds.lomax}`;
   }
   
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  
   const res = await fetch(url, {
-    next: { revalidate: 0 },
-    headers: { 'Accept': 'application/json' },
+    headers: {
+      'Accept': 'application/json',
+      'User-Agent': 'FlightRadar/1.0',
+    },
+    signal: controller.signal,
+    cache: 'no-store',
   });
+  
+  clearTimeout(timeout);
   
   if (!res.ok) {
     throw new Error(`OpenSky API error: ${res.status}`);
@@ -117,6 +126,33 @@ export function latLngAltToVector3(
   const z = r * Math.sin(phi) * Math.sin(theta);
   
   return [x, y, z];
+}
+
+// Parse raw OpenSky response (for client-side fallback)
+export function classifyAndParse(data: { time: number; states: (string | number | boolean | null)[][] | null }): Aircraft[] {
+  if (!data.states) return [];
+  
+  return data.states
+    .filter(s => s[5] != null && s[6] != null)
+    .map(s => {
+      const callsign = ((s[1] as string) || '').trim();
+      const originCountry = (s[2] as string) || '';
+      return {
+        icao24: s[0] as string,
+        callsign,
+        originCountry,
+        lat: s[6] as number,
+        lng: s[5] as number,
+        altitude: ((s[7] as number) || 0),
+        velocity: ((s[9] as number) || 0),
+        heading: ((s[10] as number) || 0),
+        verticalRate: ((s[11] as number) || 0),
+        onGround: (s[8] as boolean) || false,
+        category: classifyAircraft(callsign, originCountry),
+        lastUpdate: (s[4] as number) || data.time,
+      };
+    })
+    .filter(a => !a.onGround);
 }
 
 export const CATEGORY_COLORS: Record<Aircraft['category'], string> = {

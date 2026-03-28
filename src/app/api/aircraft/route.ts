@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { fetchAircraft } from '@/lib/opensky';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 30;
 
 export async function GET(request: Request) {
   try {
@@ -20,6 +21,10 @@ export async function GET(request: Request) {
       time: Date.now(),
       count: aircraft.length,
       aircraft,
+    }, {
+      headers: {
+        'Cache-Control': 'public, s-maxage=10, stale-while-revalidate=5',
+      }
     });
   } catch (error) {
     console.error('Aircraft fetch error:', error);
