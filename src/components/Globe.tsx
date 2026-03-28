@@ -1,19 +1,22 @@
 'use client';
 
-import { useRef, useMemo, useCallback, useState, useEffect } from 'react';
-import { Canvas, useFrame, useThree, ThreeEvent } from '@react-three/fiber';
+import { useRef, useMemo, useCallback, useEffect } from 'react';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, Stars } from '@react-three/drei';
 import * as THREE from 'three';
 import { Aircraft, latLngAltToVector3, CATEGORY_COLORS } from '@/lib/opensky';
 
 const GLOBE_RADIUS = 2;
 
-// Earth sphere with texture
+// Earth sphere with high-res NASA texture
 function Earth() {
   const meshRef = useRef<THREE.Mesh>(null);
   const texture = useMemo(() => {
     const loader = new THREE.TextureLoader();
-    return loader.load('https://unpkg.com/three-globe@2.34.0/example/img/earth-blue-marble.jpg');
+    const tex = loader.load('https://eoimages.gsfc.nasa.gov/images/imagerecords/74000/74393/world.200412.3x5400x2700.jpg');
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 16;
+    return tex;
   }, []);
   
   const bumpMap = useMemo(() => {
@@ -23,13 +26,13 @@ function Earth() {
 
   return (
     <mesh ref={meshRef}>
-      <sphereGeometry args={[GLOBE_RADIUS, 64, 64]} />
+      <sphereGeometry args={[GLOBE_RADIUS, 128, 128]} />
       <meshPhongMaterial
         map={texture}
         bumpMap={bumpMap}
-        bumpScale={0.02}
-        specular={new THREE.Color(0x333333)}
-        shininess={5}
+        bumpScale={0.03}
+        specular={new THREE.Color(0x222222)}
+        shininess={8}
       />
     </mesh>
   );
@@ -37,8 +40,6 @@ function Earth() {
 
 // Atmosphere glow
 function Atmosphere() {
-  const shaderRef = useRef<THREE.ShaderMaterial>(null);
-  
   const vertexShader = `
     varying vec3 vNormal;
     void main() {
@@ -59,7 +60,6 @@ function Atmosphere() {
     <mesh>
       <sphereGeometry args={[GLOBE_RADIUS * 1.015, 64, 64]} />
       <shaderMaterial
-        ref={shaderRef}
         vertexShader={vertexShader}
         fragmentShader={fragmentShader}
         blending={THREE.AdditiveBlending}
@@ -70,52 +70,7 @@ function Atmosphere() {
   );
 }
 
-// Individual aircraft point with direction indicator
-function AircraftPoint({
-  aircraft,
-  isSelected,
-  onSelect,
-}: {
-  aircraft: Aircraft;
-  isSelected: boolean;
-  onSelect: (a: Aircraft) => void;
-}) {
-  const meshRef = useRef<THREE.Mesh>(null);
-  const trailRef = useRef<THREE.Line>(null);
-  
-  const position = useMemo(
-    () => latLngAltToVector3(aircraft.lat, aircraft.lng, aircraft.altitude / 1000, GLOBE_RADIUS),
-    [aircraft.lat, aircraft.lng, aircraft.altitude]
-  );
-  
-  const color = CATEGORY_COLORS[aircraft.category];
-  const size = isSelected ? 0.025 : 0.012;
-
-  return (
-    <group>
-      <mesh
-        ref={meshRef}
-        position={position}
-        onClick={(e: ThreeEvent<MouseEvent>) => {
-          e.stopPropagation();
-          onSelect(aircraft);
-        }}
-      >
-        <sphereGeometry args={[size, 8, 8]} />
-        <meshBasicMaterial color={color} />
-      </mesh>
-      {/* Glow effect for selected */}
-      {isSelected && (
-        <mesh position={position}>
-          <sphereGeometry args={[0.04, 16, 16]} />
-          <meshBasicMaterial color={color} transparent opacity={0.3} />
-        </mesh>
-      )}
-    </group>
-  );
-}
-
-// All aircraft as instanced mesh for performance
+// Aircraft renderer using instanced mesh + custom click detection
 function AircraftLayer({
   aircraft,
   selectedId,
@@ -128,24 +83,34 @@ function AircraftLayer({
   filters: Set<Aircraft['category']>;
 }) {
   const instancedRef = useRef<THREE.InstancedMesh>(null);
-  const colorRef = useRef<Float32Array>(null);
+  const { camera, gl } = useThree();
+  const raycaster = useMemo(() => new THREE.Raycaster(), []);
+  const mouse = useMemo(() => new THREE.Vector2(), []);
   
   const filtered = useMemo(
     () => aircraft.filter(a => filters.has(a.category)),
     [aircraft, filters]
   );
+
+  // Pre-compute 3D positions for click detection
+  const positions = useMemo(
+    () => filtered.map(a => {
+      const [x, y, z] = latLngAltToVector3(a.lat, a.lng, a.altitude / 1000, GLOBE_RADIUS);
+      return new THREE.Vector3(x, y, z);
+    }),
+    [filtered]
+  );
   
-  // For large datasets, use instanced mesh
   const dummy = useMemo(() => new THREE.Object3D(), []);
-  
+
+  // Update instanced mesh
   useEffect(() => {
     if (!instancedRef.current || filtered.length === 0) return;
     
     const colors = new Float32Array(filtered.length * 3);
     
     filtered.forEach((a, i) => {
-      const pos = latLngAltToVector3(a.lat, a.lng, a.altitude / 1000, GLOBE_RADIUS);
-      dummy.position.set(...pos);
+      dummy.position.copy(positions[i]);
       const s = a.icao24 === selectedId ? 2.5 : 1;
       dummy.scale.set(s, s, s);
       dummy.updateMatrix();
@@ -162,15 +127,75 @@ function AircraftLayer({
       'color',
       new THREE.InstancedBufferAttribute(colors, 3)
     );
-  }, [filtered, selectedId, dummy]);
+    instancedRef.current.computeBoundingSphere();
+  }, [filtered, selectedId, dummy, positions]);
+
+  // Custom click handler: project aircraft positions to screen space and find closest to click
+  const handlePointerDown = useRef<{ x: number; y: number } | null>(null);
   
-  const handleClick = useCallback((e: ThreeEvent<MouseEvent>) => {
-    e.stopPropagation();
-    const idx = e.instanceId;
-    if (idx !== undefined && idx < filtered.length) {
-      onSelect(filtered[idx]);
-    }
-  }, [filtered, onSelect]);
+  useEffect(() => {
+    const canvas = gl.domElement;
+    
+    const onDown = (e: PointerEvent) => {
+      handlePointerDown.current = { x: e.clientX, y: e.clientY };
+    };
+    
+    const onUp = (e: PointerEvent) => {
+      if (!handlePointerDown.current) return;
+      
+      // Only fire click if mouse didn't move much (not a drag)
+      const dx = e.clientX - handlePointerDown.current.x;
+      const dy = e.clientY - handlePointerDown.current.y;
+      if (Math.sqrt(dx * dx + dy * dy) > 5) {
+        handlePointerDown.current = null;
+        return;
+      }
+      handlePointerDown.current = null;
+      
+      const rect = canvas.getBoundingClientRect();
+      const clickX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      const clickY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      
+      // Project all aircraft positions to screen space and find closest
+      let bestDist = Infinity;
+      let bestIdx = -1;
+      
+      const projected = new THREE.Vector3();
+      
+      for (let i = 0; i < positions.length; i++) {
+        projected.copy(positions[i]);
+        projected.project(camera);
+        
+        // Check if on visible side of globe (z < 1 in NDC)
+        if (projected.z > 1) continue;
+        
+        const dist = Math.sqrt(
+          (projected.x - clickX) ** 2 + 
+          (projected.y - clickY) ** 2
+        );
+        
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestIdx = i;
+        }
+      }
+      
+      // Threshold in NDC space - roughly 20px at typical viewport size
+      const threshold = 40 / Math.min(rect.width, rect.height);
+      
+      if (bestIdx >= 0 && bestDist < threshold) {
+        onSelect(filtered[bestIdx]);
+      }
+    };
+    
+    canvas.addEventListener('pointerdown', onDown);
+    canvas.addEventListener('pointerup', onUp);
+    
+    return () => {
+      canvas.removeEventListener('pointerdown', onDown);
+      canvas.removeEventListener('pointerup', onUp);
+    };
+  }, [gl, camera, positions, filtered, onSelect]);
 
   if (filtered.length === 0) return null;
 
@@ -178,11 +203,55 @@ function AircraftLayer({
     <instancedMesh
       ref={instancedRef}
       args={[undefined, undefined, filtered.length]}
-      onClick={handleClick}
+      frustumCulled={false}
     >
-      <sphereGeometry args={[0.012, 6, 6]} />
+      <sphereGeometry args={[0.014, 6, 6]} />
       <meshBasicMaterial vertexColors />
     </instancedMesh>
+  );
+}
+
+// Selected aircraft glow ring
+function SelectedGlow({
+  aircraft,
+}: {
+  aircraft: Aircraft | null;
+}) {
+  const ringRef = useRef<THREE.Mesh>(null);
+  
+  const position = useMemo(() => {
+    if (!aircraft) return null;
+    return latLngAltToVector3(aircraft.lat, aircraft.lng, aircraft.altitude / 1000, GLOBE_RADIUS);
+  }, [aircraft]);
+  
+  useFrame((_, delta) => {
+    if (ringRef.current) {
+      ringRef.current.rotation.z += delta * 3;
+    }
+  });
+
+  if (!aircraft || !position) return null;
+  
+  const color = CATEGORY_COLORS[aircraft.category];
+
+  return (
+    <group position={position}>
+      {/* Bright centre */}
+      <mesh>
+        <sphereGeometry args={[0.03, 16, 16]} />
+        <meshBasicMaterial color={color} />
+      </mesh>
+      {/* Outer glow */}
+      <mesh>
+        <sphereGeometry args={[0.06, 16, 16]} />
+        <meshBasicMaterial color={color} transparent opacity={0.2} />
+      </mesh>
+      {/* Spinning ring */}
+      <mesh ref={ringRef}>
+        <ringGeometry args={[0.05, 0.06, 32]} />
+        <meshBasicMaterial color={color} transparent opacity={0.5} side={THREE.DoubleSide} />
+      </mesh>
+    </group>
   );
 }
 
@@ -214,22 +283,22 @@ function UserLocation({ lat, lng }: { lat: number; lng: number }) {
   );
 }
 
-// Scene wrapper with camera and controls
+// Scene
 function Scene({
   aircraft,
   selectedId,
+  selectedAircraft,
   onSelect,
   filters,
   userLocation,
 }: {
   aircraft: Aircraft[];
   selectedId: string | null;
+  selectedAircraft: Aircraft | null;
   onSelect: (a: Aircraft) => void;
   filters: Set<Aircraft['category']>;
   userLocation: { lat: number; lng: number } | null;
 }) {
-  const controlsRef = useRef(null);
-
   return (
     <>
       <ambientLight intensity={0.6} />
@@ -247,12 +316,13 @@ function Scene({
         filters={filters}
       />
       
+      <SelectedGlow aircraft={selectedAircraft} />
+      
       {userLocation && (
         <UserLocation lat={userLocation.lat} lng={userLocation.lng} />
       )}
       
       <OrbitControls
-        ref={controlsRef}
         enablePan={false}
         minDistance={2.5}
         maxDistance={8}
@@ -268,12 +338,14 @@ function Scene({
 export default function Globe({
   aircraft,
   selectedId,
+  selectedAircraft,
   onSelect,
   filters,
   userLocation,
 }: {
   aircraft: Aircraft[];
   selectedId: string | null;
+  selectedAircraft: Aircraft | null;
   onSelect: (a: Aircraft) => void;
   filters: Set<Aircraft['category']>;
   userLocation: { lat: number; lng: number } | null;
@@ -282,11 +354,13 @@ export default function Globe({
     <Canvas
       camera={{ position: [0, 0, 5], fov: 45 }}
       style={{ width: '100%', height: '100%', background: '#000' }}
-      gl={{ antialias: true, alpha: false }}
+      dpr={[1, 2]}
+      gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }}
     >
       <Scene
         aircraft={aircraft}
         selectedId={selectedId}
+        selectedAircraft={selectedAircraft}
         onSelect={onSelect}
         filters={filters}
         userLocation={userLocation}

@@ -174,6 +174,7 @@ export default function Home() {
       <Globe
         aircraft={aircraft}
         selectedId={selectedAircraft?.icao24 || null}
+        selectedAircraft={selectedAircraft}
         onSelect={handleSelect}
         filters={filters}
         userLocation={userLocation}
