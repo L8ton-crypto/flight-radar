@@ -13,15 +13,17 @@ function Earth() {
   const meshRef = useRef<THREE.Mesh>(null);
   const texture = useMemo(() => {
     const loader = new THREE.TextureLoader();
-    const tex = loader.load('https://eoimages.gsfc.nasa.gov/images/imagerecords/74000/74393/world.200412.3x5400x2700.jpg');
+    const tex = loader.load('/earth-blue-marble.jpg');
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 16;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
     return tex;
   }, []);
   
   const bumpMap = useMemo(() => {
     const loader = new THREE.TextureLoader();
-    return loader.load('https://unpkg.com/three-globe@2.34.0/example/img/earth-topology.png');
+    return loader.load('/earth-topology.png');
   }, []);
 
   return (
