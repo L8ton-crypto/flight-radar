@@ -72,7 +72,54 @@ function Atmosphere() {
   );
 }
 
-// Aircraft renderer using instanced mesh + custom click detection
+// Custom shader for crisp circular points with glow
+const pointVertexShader = `
+  attribute vec3 color;
+  attribute float selected;
+  varying vec3 vColor;
+  varying float vSelected;
+  
+  void main() {
+    vColor = color;
+    vSelected = selected;
+    
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+    
+    // Scale point size based on distance (closer = bigger)
+    float size = selected > 0.5 ? 12.0 : 6.0;
+    gl_PointSize = size * (300.0 / -mvPosition.z);
+    gl_PointSize = clamp(gl_PointSize, 2.0, 24.0);
+    
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`;
+
+const pointFragmentShader = `
+  varying vec3 vColor;
+  varying float vSelected;
+  
+  void main() {
+    // Distance from centre of point (0 to 1)
+    float d = length(gl_PointCoord - vec2(0.5));
+    
+    // Crisp circle with soft edge
+    float alpha = 1.0 - smoothstep(0.35, 0.5, d);
+    
+    if (alpha < 0.01) discard;
+    
+    // Glow effect for selected
+    vec3 col = vColor;
+    if (vSelected > 0.5) {
+      float glow = 1.0 - smoothstep(0.0, 0.5, d);
+      col = mix(col, vec3(1.0), glow * 0.3);
+      alpha = max(alpha, (1.0 - smoothstep(0.2, 0.5, d)) * 0.6);
+    }
+    
+    gl_FragColor = vec4(col, alpha);
+  }
+`;
+
+// Aircraft renderer using Points (GPU shader circles) + custom click detection
 function AircraftLayer({
   aircraft,
   selectedId,
@@ -84,17 +131,15 @@ function AircraftLayer({
   onSelect: (a: Aircraft) => void;
   filters: Set<Aircraft['category']>;
 }) {
-  const instancedRef = useRef<THREE.InstancedMesh>(null);
+  const pointsRef = useRef<THREE.Points>(null);
   const { camera, gl } = useThree();
-  const raycaster = useMemo(() => new THREE.Raycaster(), []);
-  const mouse = useMemo(() => new THREE.Vector2(), []);
   
   const filtered = useMemo(
     () => aircraft.filter(a => filters.has(a.category)),
     [aircraft, filters]
   );
 
-  // Pre-compute 3D positions for click detection
+  // Pre-compute 3D positions
   const positions = useMemo(
     () => filtered.map(a => {
       const [x, y, z] = latLngAltToVector3(a.lat, a.lng, a.altitude / 1000, GLOBE_RADIUS);
@@ -102,37 +147,36 @@ function AircraftLayer({
     }),
     [filtered]
   );
-  
-  const dummy = useMemo(() => new THREE.Object3D(), []);
 
-  // Update instanced mesh
+  // Build geometry with positions, colors, and selected attribute
   useEffect(() => {
-    if (!instancedRef.current || filtered.length === 0) return;
+    if (!pointsRef.current || filtered.length === 0) return;
     
-    const colors = new Float32Array(filtered.length * 3);
+    const geo = pointsRef.current.geometry;
+    const posArray = new Float32Array(filtered.length * 3);
+    const colorArray = new Float32Array(filtered.length * 3);
+    const selectedArray = new Float32Array(filtered.length);
     
     filtered.forEach((a, i) => {
-      dummy.position.copy(positions[i]);
-      const s = a.icao24 === selectedId ? 2.5 : 1;
-      dummy.scale.set(s, s, s);
-      dummy.updateMatrix();
-      instancedRef.current!.setMatrixAt(i, dummy.matrix);
+      posArray[i * 3] = positions[i].x;
+      posArray[i * 3 + 1] = positions[i].y;
+      posArray[i * 3 + 2] = positions[i].z;
       
       const col = new THREE.Color(CATEGORY_COLORS[a.category]);
-      colors[i * 3] = col.r;
-      colors[i * 3 + 1] = col.g;
-      colors[i * 3 + 2] = col.b;
+      colorArray[i * 3] = col.r;
+      colorArray[i * 3 + 1] = col.g;
+      colorArray[i * 3 + 2] = col.b;
+      
+      selectedArray[i] = a.icao24 === selectedId ? 1.0 : 0.0;
     });
     
-    instancedRef.current.instanceMatrix.needsUpdate = true;
-    instancedRef.current.geometry.setAttribute(
-      'color',
-      new THREE.InstancedBufferAttribute(colors, 3)
-    );
-    instancedRef.current.computeBoundingSphere();
-  }, [filtered, selectedId, dummy, positions]);
+    geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(colorArray, 3));
+    geo.setAttribute('selected', new THREE.BufferAttribute(selectedArray, 1));
+    geo.computeBoundingSphere();
+  }, [filtered, selectedId, positions]);
 
-  // Custom click handler: project aircraft positions to screen space and find closest to click
+  // Custom click handler: screen-space proximity
   const handlePointerDown = useRef<{ x: number; y: number } | null>(null);
   
   useEffect(() => {
@@ -145,10 +189,9 @@ function AircraftLayer({
     const onUp = (e: PointerEvent) => {
       if (!handlePointerDown.current) return;
       
-      // Only fire click if mouse didn't move much (not a drag)
       const dx = e.clientX - handlePointerDown.current.x;
       const dy = e.clientY - handlePointerDown.current.y;
-      if (Math.sqrt(dx * dx + dy * dy) > 5) {
+      if (Math.sqrt(dx * dx + dy * dy) > 8) {
         handlePointerDown.current = null;
         return;
       }
@@ -158,17 +201,14 @@ function AircraftLayer({
       const clickX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       const clickY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       
-      // Project all aircraft positions to screen space and find closest
       let bestDist = Infinity;
       let bestIdx = -1;
-      
       const projected = new THREE.Vector3();
       
       for (let i = 0; i < positions.length; i++) {
         projected.copy(positions[i]);
         projected.project(camera);
         
-        // Check if on visible side of globe (z < 1 in NDC)
         if (projected.z > 1) continue;
         
         const dist = Math.sqrt(
@@ -182,8 +222,7 @@ function AircraftLayer({
         }
       }
       
-      // Threshold in NDC space - roughly 20px at typical viewport size
-      const threshold = 40 / Math.min(rect.width, rect.height);
+      const threshold = 50 / Math.min(rect.width, rect.height);
       
       if (bestIdx >= 0 && bestDist < threshold) {
         onSelect(filtered[bestIdx]);
@@ -202,14 +241,16 @@ function AircraftLayer({
   if (filtered.length === 0) return null;
 
   return (
-    <instancedMesh
-      ref={instancedRef}
-      args={[undefined, undefined, filtered.length]}
-      frustumCulled={false}
-    >
-      <sphereGeometry args={[0.014, 6, 6]} />
-      <meshBasicMaterial vertexColors />
-    </instancedMesh>
+    <points ref={pointsRef} frustumCulled={false}>
+      <bufferGeometry />
+      <shaderMaterial
+        vertexShader={pointVertexShader}
+        fragmentShader={pointFragmentShader}
+        transparent
+        depthWrite={false}
+        blending={THREE.AdditiveBlending}
+      />
+    </points>
   );
 }
 
