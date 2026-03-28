@@ -72,23 +72,26 @@ function Atmosphere() {
   );
 }
 
-// Custom shader for crisp circular points with glow
+// Custom shader for plane-shaped points, rotated by heading
 const pointVertexShader = `
   attribute vec3 color;
   attribute float selected;
+  attribute float heading;
   varying vec3 vColor;
   varying float vSelected;
+  varying float vHeading;
   
   void main() {
     vColor = color;
     vSelected = selected;
+    vHeading = heading;
     
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
     
-    // Scale point size based on distance (closer = bigger, further = smaller)
-    float baseSize = selected > 0.5 ? 10.0 : 5.0;
+    // Scale point size based on distance
+    float baseSize = selected > 0.5 ? 28.0 : 18.0;
     gl_PointSize = baseSize * (5.0 / -mvPosition.z);
-    gl_PointSize = clamp(gl_PointSize, 1.5, 16.0);
+    gl_PointSize = clamp(gl_PointSize, 3.0, 32.0);
     
     gl_Position = projectionMatrix * mvPosition;
   }
@@ -97,22 +100,59 @@ const pointVertexShader = `
 const pointFragmentShader = `
   varying vec3 vColor;
   varying float vSelected;
+  varying float vHeading;
+  
+  // Rotate a 2D point around origin
+  vec2 rotate(vec2 p, float angle) {
+    float c = cos(angle);
+    float s = sin(angle);
+    return vec2(p.x * c - p.y * s, p.x * s + p.y * c);
+  }
+  
+  // SDF for a plane silhouette (pointed up by default)
+  float planeSDF(vec2 p) {
+    // Fuselage - tall thin ellipse
+    float fuselage = length(p * vec2(3.0, 1.0)) - 0.3;
+    
+    // Wings - wide at middle
+    vec2 wp = abs(p);
+    float wings = length((wp - vec2(0.0, 0.02)) * vec2(1.0, 4.0)) - 0.28;
+    
+    // Tail fins
+    vec2 tp = abs(p);
+    float tail = length((tp - vec2(0.0, 0.25)) * vec2(1.6, 5.0)) - 0.18;
+    
+    // Nose cone
+    float nose = length((p - vec2(0.0, -0.28)) * vec2(2.5, 1.2)) - 0.12;
+    
+    return min(min(fuselage, wings), min(tail, nose));
+  }
   
   void main() {
-    // Distance from centre of point (0 to 1)
-    float d = length(gl_PointCoord - vec2(0.5));
+    // Centre and normalise point coords to -0.5..0.5
+    vec2 uv = gl_PointCoord - vec2(0.5);
     
-    // Crisp circle with soft edge
-    float alpha = 1.0 - smoothstep(0.35, 0.5, d);
+    // Rotate by heading (heading is degrees from north, clockwise)
+    float angle = vHeading * 3.14159265 / 180.0;
+    uv = rotate(uv, angle);
+    
+    // Evaluate plane shape
+    float d = planeSDF(uv);
+    
+    // Crisp edge with slight AA
+    float alpha = 1.0 - smoothstep(-0.02, 0.01, d);
     
     if (alpha < 0.01) discard;
     
-    // Glow effect for selected
     vec3 col = vColor;
+    
+    // Selected glow
     if (vSelected > 0.5) {
-      float glow = 1.0 - smoothstep(0.0, 0.5, d);
-      col = mix(col, vec3(1.0), glow * 0.3);
-      alpha = max(alpha, (1.0 - smoothstep(0.2, 0.5, d)) * 0.6);
+      float glow = 1.0 - smoothstep(-0.05, 0.15, d);
+      col = mix(col, vec3(1.0), glow * 0.4);
+      // Outer glow ring
+      float ring = 1.0 - smoothstep(0.01, 0.12, abs(d + 0.06));
+      alpha = max(alpha, ring * 0.5);
     }
     
     gl_FragColor = vec4(col, alpha);
@@ -156,6 +196,7 @@ function AircraftLayer({
     const posArray = new Float32Array(filtered.length * 3);
     const colorArray = new Float32Array(filtered.length * 3);
     const selectedArray = new Float32Array(filtered.length);
+    const headingArray = new Float32Array(filtered.length);
     
     filtered.forEach((a, i) => {
       posArray[i * 3] = positions[i].x;
@@ -168,11 +209,13 @@ function AircraftLayer({
       colorArray[i * 3 + 2] = col.b;
       
       selectedArray[i] = a.icao24 === selectedId ? 1.0 : 0.0;
+      headingArray[i] = a.heading || 0;
     });
     
     geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(colorArray, 3));
     geo.setAttribute('selected', new THREE.BufferAttribute(selectedArray, 1));
+    geo.setAttribute('heading', new THREE.BufferAttribute(headingArray, 1));
     geo.computeBoundingSphere();
   }, [filtered, selectedId, positions]);
 
