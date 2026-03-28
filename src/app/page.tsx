@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import dynamic from 'next/dynamic';
 import { Aircraft } from '@/lib/opensky';
+import { fetchAircraftClient } from '@/lib/client-fetch';
 import InfoPanel from '@/components/InfoPanel';
 import Controls from '@/components/Controls';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -41,33 +42,14 @@ export default function Home() {
     setIsLoading(true);
     setError(null);
     try {
-      // Try our API proxy first, fall back to direct OpenSky
-      let data;
-      try {
-        const res = await fetch('/api/aircraft');
-        if (!res.ok) throw new Error(`Proxy: ${res.status}`);
-        data = await res.json();
-        if (data.error) throw new Error(data.error);
-      } catch {
-        // Direct fallback - OpenSky allows CORS
-        const res = await fetch('https://opensky-network.org/api/states/all');
-        if (!res.ok) throw new Error(`OpenSky: ${res.status}`);
-        const raw = await res.json();
-        const { classifyAndParse } = await import('@/lib/opensky');
-        data = {
-          time: Date.now(),
-          aircraft: classifyAndParse(raw),
-          count: 0,
-        };
-        data.count = data.aircraft.length;
-      }
+      const data = await fetchAircraftClient();
       
-      setAircraft(data.aircraft || []);
+      setAircraft(data.aircraft);
       setLastUpdate(data.time);
       
       // Update selected aircraft if still exists
       if (selectedAircraft) {
-        const updated = (data.aircraft || []).find(
+        const updated = data.aircraft.find(
           (a: Aircraft) => a.icao24 === selectedAircraft.icao24
         );
         if (updated) setSelectedAircraft(updated);
